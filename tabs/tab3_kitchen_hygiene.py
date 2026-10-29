@@ -8,10 +8,13 @@ import streamlit as st
 from ai_client import AIClient
 from config import AppConfig, HYGIENE_INDICATORS
 from personas import build_system_prompt, get_persona
+from ui import copy_button, data_table, download_button, empty_state, metric_strip, reserve_analysis
 from utils import (
+    esc,
     image_bytes,
     load_image,
     parse_json_safe,
+    upload_fingerprint,
 )
 
 
@@ -40,7 +43,6 @@ def _demo_hygiene_analysis(image) -> Dict[str, Any]:
     from utils import dominant_color_analysis
     analysis = dominant_color_analysis(image)
 
-    # Heuristic scoring based on brightness/colors (very naive)
     score = 78
     violations: List[Dict[str, str]] = []
     indicators = {
@@ -110,102 +112,173 @@ def _score_badge_color(score: float) -> str:
     return "#ef4444"
 
 
-def render(config: AppConfig, ai_client: AIClient) -> None:
-    st.header("🧼 Kitchen Hygiene & Safety Compliance")
-    st.caption("Epic 4 — Commercial kitchen hygiene inspection with compliance scoring and violation logs.")
+def _status_for(score: float) -> str:
+    if score >= 85:
+        return "Compliant"
+    if score >= 65:
+        return "Needs Attention"
+    return "Non-Compliant"
 
+
+def _severity_rank(severity: str) -> int:
+    return {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}.get(severity, 4)
+
+
+def render(config: AppConfig, ai_client: AIClient) -> None:
     col_up, col_ctrl = st.columns([3, 1])
     with col_up:
         uploaded = st.file_uploader(
-            "Upload kitchen photo or video frame",
-            type=["jpg", "jpeg", "png", "webp", "mp4", "mov", "avi"],
+            "Upload a kitchen photo",
+            type=["jpg", "jpeg", "png", "webp"],
+            help="Video frame extraction is not enabled yet — upload a still frame of the kitchen.",
         )
     with col_ctrl:
-        run_btn = st.button("Inspect Kitchen", key="tab3_run")
+        run_btn = st.button("Inspect Kitchen", key="tab3_run", type="primary", width="stretch")
 
     if not uploaded:
-        st.info("Upload a kitchen environment image or video frame. Demo mode runs without an API key.")
+        empty_state(
+            "🧼",
+            "No kitchen photo yet",
+            "Upload a photo of the prep area to score hygiene compliance and log violations. "
+            "Demo mode runs without an API key.",
+        )
         return
 
     image = load_image(uploaded)
     if image is None:
-        st.error("Failed to load image/video frame.")
+        st.error("Failed to load image.")
         return
 
-    st.image(image, caption="Uploaded kitchen view", use_container_width=True)
-
-    if run_btn or "tab3_result" not in st.session_state:
+    fingerprint = upload_fingerprint(uploaded)
+    stored_fp = st.session_state.get("tab3_fp")
+    if run_btn or "tab3_result" not in st.session_state or stored_fp != fingerprint:
+        if not reserve_analysis(config, ai_client):
+            return
         with st.spinner("Inspecting hygiene indicators..."):
             result = _run_vision(ai_client, config, image)
         st.session_state["tab3_result"] = result
+        st.session_state["tab3_fp"] = fingerprint
+    else:
+        result = st.session_state["tab3_result"]
 
-    result = st.session_state.get("tab3_result", {})
     score = float(result.get("compliance_score", 0))
     color = _score_badge_color(score)
+    status = _status_for(score)
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
+    # ---- Image Left / Content Right ----
+    img_col, info_col = st.columns([1, 1])
+    with img_col:
+        st.image(image, caption="Uploaded kitchen view", width="stretch")
+    with info_col:
+        st.markdown("### Compliance Score")
         st.markdown(
-            f'<div class="fv-metric">'
-            f'<span class="val" style="color:{color}">{score:.0f}</span>'
-            f'<span class="lab">Compliance Score (%)</span></div>', unsafe_allow_html=True,
+            f'<div style="font-size:2.4rem;font-weight:900;color:{color};line-height:1.1">{score:.0f}%</div>',
+            unsafe_allow_html=True,
         )
-    with c2:
-        st.metric("Confidence", f"{result.get('confidence', 0)}%")
-    with c3:
-        status = "Compliant" if score >= 85 else ("Needs Attention" if score >= 65 else "Non-Compliant")
-        st.metric("Status", status)
+        st.markdown(
+            f'<span class="fv-pill {"fresh" if score >= 85 else ("moderate" if score >= 65 else "spoiled")}">'
+            f'{esc(status)}</span>', unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<span class="fv-meter" style="display:block;margin:0.7rem 0;">'
+            f'<span class="fv-meter-fill" style="width:{max(0.0, min(100.0, score))}%;background:{color}"></span>'
+            f'</span>', unsafe_allow_html=True,
+        )
+        st.caption("Thresholds — compliant ≥ 85 · needs attention ≥ 65 · otherwise non-compliant.")
 
     st.divider()
 
-    # Indicators
-    st.subheader("📋 Hygiene Indicators")
+    # ---- Hygiene Indicators below ----
+    st.markdown('<div class="fv-section-title">📋 Hygiene Indicators</div>', unsafe_allow_html=True)
     indicators = result.get("indicators", {})
-    ind_cols = st.columns(2)
-    for i, key in enumerate(HYGIENE_INDICATORS):
-        val = indicators.get(key.lower().replace(" / ", "_").replace(" ", "_"), "Not observed")
-        # map friendly key to internal
-        mapping = {
-            "Chef Hat / Hairnet Compliance": "chef_hat_hairnet",
-            "Glove Usage": "glove_usage",
-            "Sanitization State": "sanitization_state",
-            "Cross-Contamination Hazards": "cross_contamination",
-        }
+    mapping = {
+        "Chef Hat / Hairnet Compliance": "chef_hat_hairnet",
+        "Glove Usage": "glove_usage",
+        "Sanitization State": "sanitization_state",
+        "Cross-Contamination Hazards": "cross_contamination",
+    }
+    indicator_rows = []
+    for key in HYGIENE_INDICATORS:
         internal = mapping.get(key, key.lower().replace(" ", "_"))
         val = indicators.get(internal, "Not observed")
-        with ind_cols[i % 2]:
-            badge = "fresh" if val in ("Compliant", "Sanitized", "None detected") else ("moderate" if val in ("Needs attention", "Potential hazard") else "spoiled")
-            st.markdown(
-                f'<div class="fv-card" style="padding:0.8rem 1rem;">'
-                f'<div style="font-weight:700;color:#22d3ee">{key}</div>'
-                f'<span class="fv-pill {badge}">{val}</span>'
-                f'</div>', unsafe_allow_html=True,
-            )
+        indicator_rows.append([key, esc(val)])
+
+    sev_col, conf_col = st.columns(2)
+    with sev_col:
+        violations = result.get("violations", [])
+        high = sum(1 for v in violations if v.get("severity") in ("Critical", "High"))
+        metric_strip([
+            ("Violations", f"{len(violations)}", "", "#f59e0b"),
+            ("Critical / High", f"{high}", "", "#ef4444"),
+        ])
+    with conf_col:
+        metric_strip([
+            ("Confidence", f'{result.get("confidence", 0)}%', "", "#0ea5e9"),
+            ("Indicators", f"{len(indicator_rows)}", "checked", "#10b981"),
+        ])
+
+    st.markdown("")
+    data_table(["Indicator", "Observation"], indicator_rows)
 
     # Violations log
     st.divider()
-    st.subheader("🚨 Itemized Violation Log")
-    violations = result.get("violations", [])
+    st.markdown('<div class="fv-section-title">🚨 Itemized Violation Log</div>', unsafe_allow_html=True)
+    violations = sorted(
+        result.get("violations", []),
+        key=lambda v: _severity_rank(v.get("severity", "Low")),
+    )
     if violations:
-        for v in violations:
-            sev = v.get("severity", "Low")
-            sev_color = {"Critical": "#ef4444", "High": "#f97316", "Medium": "#f59e0b", "Low": "#10b981"}.get(sev, "#94a3b8")
-            st.markdown(
-                f'<div class="violation">'
-                f'<span class="v-title">[{sev}]</span> {v.get("indicator", "General")} — '
-                f'{v.get("description", "")}</div>', unsafe_allow_html=True,
-            )
+        data_table(
+            ["Severity", "Indicator", "Description"],
+            [
+                [esc(v.get("severity", "Low")), esc(v.get("indicator", "General")), esc(v.get("description", ""))]
+                for v in violations
+            ],
+        )
     else:
-        st.success("No violations logged.")
+        st.markdown(
+            '<div class="fv-alert success">No violations logged.</div>',
+            unsafe_allow_html=True,
+        )
 
     # Recommendations
     st.divider()
-    st.subheader("✅ Corrective Recommendations")
-    for rec in result.get("recommendations", []):
-        st.markdown(f"• {rec}")
+    st.markdown('<div class="fv-section-title">✅ Corrective Recommendations</div>', unsafe_allow_html=True)
+    recommendations = result.get("recommendations", [])
+    if recommendations:
+        st.markdown(
+            '<ul style="color:var(--fv-text-soft);line-height:1.7;margin-top:0.2rem;">'
+            + "".join(f"<li>{esc(r)}</li>" for r in recommendations)
+            + "</ul>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption("No recommendations returned.")
 
     if result.get("notes"):
-        st.caption(f"🔎 {result['notes']}")
+        st.caption(f"🔎 {esc(result['notes'])}")
 
-    st.divider()
-    st.caption("Demo mode: compliance scoring is heuristic. Critical hazards require immediate correction.")
+    export_lines = [
+        f"Kitchen hygiene compliance score: {score:.0f}% ({status})",
+        f"Confidence: {result.get('confidence', 0)}%",
+        "",
+        "Indicators:",
+        *[f"- {k}: {v}" for k, v in indicator_rows],
+        "",
+        "Violations:",
+        *[
+            f"- [{v.get('severity', 'Low')}] {v.get('indicator', 'General')}: {v.get('description', '')}"
+            for v in violations
+        ],
+        "",
+        "Recommendations:",
+        *[f"- {r}" for r in recommendations],
+    ]
+    export_text = "\n".join(export_lines)
+    d_col, c_col = st.columns([1, 1])
+    with d_col:
+        download_button(export_text, "foodverse-hygiene-report.txt", label="Download report")
+    with c_col:
+        copy_button(export_text, "Copy summary", key="tab3_copy")
+
+    st.caption("Compliance scoring is heuristic. Critical hazards require immediate correction.")

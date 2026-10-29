@@ -1,6 +1,8 @@
 """Food Verse AI - Utility helpers (image analysis, formatting, fallback data)."""
 from __future__ import annotations
 
+import hashlib
+import html
 import io
 import json
 import re
@@ -124,6 +126,30 @@ def parse_json_safe(text: str, fallback: Any = None) -> Any:
 
 def now_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
+
+
+def esc(value: Any) -> str:
+    """HTML-escape any value so model output can be embedded safely."""
+    return html.escape(str(value if value is not None else ""), quote=True)
+
+
+def upload_fingerprint(uploaded_file) -> str:
+    """Stable hash of an uploaded file so stale results can be invalidated."""
+    if uploaded_file is None:
+        return ""
+    try:
+        uploaded_file.seek(0)
+        data = uploaded_file.read()
+        uploaded_file.seek(0)
+    except Exception:
+        return ""
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def text_fingerprint(*parts: Any) -> str:
+    """Stable hash of arbitrary inputs used as a cache key."""
+    payload = "|".join("" if p is None else str(p) for p in parts)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 DEFAULT_NUTRITION_DB: Dict[str, Dict[str, float]] = {

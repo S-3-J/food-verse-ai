@@ -2,19 +2,23 @@
 from __future__ import annotations
 
 from typing import Any, Dict
+from datetime import datetime
 
 import streamlit as st
 
 from ai_client import AIClient
 from config import AppConfig, FRESHNESS_STAGES
 from personas import build_system_prompt, get_persona
+from ui import copy_button, data_table, download_button, empty_state, metric_strip, reserve_analysis
 from utils import (
     dominant_color_analysis,
+    esc,
     freshness_to_pill,
     image_bytes,
     load_image,
     parse_json_safe,
     safety_to_pill,
+    upload_fingerprint,
 )
 
 
@@ -36,11 +40,19 @@ VISION_PROMPT = """Analyze this perishable food image and return ONLY a JSON obj
 Be conservative on safety. When in doubt, recommend discard."""
 
 
-def _demo_freshness_analysis(image) -> Dict[str, Any]:
-    from utils import estimate_portion_from_image  # noqa
+STORAGE_METHODS = ["Ambient / pantry", "Refrigerated", "Frozen", "Unknown"]
+STORAGE_DAYS = {
+    "Ambient / pantry": 7,
+    "Refrigerated": 10,
+    "Frozen": 90,
+    "Unknown": 7,
+}
+STAGE_SCORE = {"Fresh": 95, "Moderately Fresh": 60, "Spoiled": 15}
 
+
+def _demo_freshness_analysis(image) -> Dict[str, Any]:
     analysis = dominant_color_analysis(image)
-    # Heuristic: brown dominance + low brightness => spoiled-ish; green => fresh
+
     if analysis["brown_dominance"] and analysis["brightness"] < 90:
         stage = "Spoiled"
         advice = "Discard immediately"
@@ -84,12 +96,15 @@ def _demo_freshness_analysis(image) -> Dict[str, Any]:
     }
 
 
-def _run_vision(ai_client: AIClient, config: AppConfig, image) -> Dict[str, Any]:
+def _run_vision(ai_client: AIClient, config: AppConfig, image, context: str = "") -> Dict[str, Any]:
     img_bytes = image_bytes(image)
     if config.demo_mode or not ai_client.is_available():
         return _demo_freshness_analysis(image)
     try:
-        text = ai_client.generate_vision(SYSTEM_PROMPT, VISION_PROMPT, img_bytes)
+        prompt = VISION_PROMPT
+        if context:
+            prompt = f"{VISION_PROMPT}\n\nStorage context: {context}"
+        text = ai_client.generate_vision(SYSTEM_PROMPT, prompt, img_bytes)
         return parse_json_safe(text, fallback=_demo_freshness_analysis(image))
     except Exception as exc:  # pragma: no cover
         st.warning(f"AI vision unavailable, using demo fallback: {exc}")
@@ -97,18 +112,33 @@ def _run_vision(ai_client: AIClient, config: AppConfig, image) -> Dict[str, Any]
 
 
 def render(config: AppConfig, ai_client: AIClient) -> None:
-    st.header("🧪 Food Freshness & Spoilage Diagnostic")
-    st.caption("Epic 3 — Perishable freshness staging with food-safety advice and preservation tips.")
+    ctx1, ctx2, ctx3 = st.columns([1, 1, 1])
+    with ctx1:
+        purchased_on = st.date_input(
+            "Purchased on",
+            value=None,
+            key="tab2_purchased",
+            help="Optional — improves the storage-age estimate.",
+        )
+    with ctx2:
+        storage = st.selectbox("Storage method", STORAGE_METHODS, key="tab2_storage")
+    with ctx3:
+        st.markdown("", unsafe_allow_html=True)
 
     col_up, col_ctrl = st.columns([3, 1])
     with col_up:
         uploaded = st.file_uploader("Upload a perishable item photo (fruit, vegetable, meat, dairy)",
                                     type=["jpg", "jpeg", "png", "webp"])
     with col_ctrl:
-        run_btn = st.button("Inspect Freshness", key="tab2_run")
+        run_btn = st.button("Inspect Freshness", key="tab2_run", type="primary", width="stretch")
 
     if not uploaded:
-        st.info("Upload a photo of a raw perishable item. Demo mode runs without an API key.")
+        empty_state(
+            "🧪",
+            "No perishable photo yet",
+            "Upload a photo of a raw perishable item — fruit, vegetable, meat or dairy — to stage "
+            "its freshness and get a safety verdict. Demo mode runs without an API key.",
+        )
         return
 
     image = load_image(uploaded)
@@ -116,68 +146,108 @@ def render(config: AppConfig, ai_client: AIClient) -> None:
         st.error("Failed to load image.")
         return
 
-    st.image(image, caption="Uploaded perishable item", use_container_width=True)
+    age_days = None
+    if purchased_on is not None:
+        age_days = max(0, (datetime.now().date() - purchased_on).days)
+    context = f"{storage}, purchased {age_days} days ago" if age_days is not None else storage
 
-    if run_btn or "tab2_result" not in st.session_state:
+    fingerprint = upload_fingerprint(uploaded) + f"|{context}"
+    stored_fp = st.session_state.get("tab2_fp")
+    if run_btn or "tab2_result" not in st.session_state or stored_fp != fingerprint:
+        if not reserve_analysis(config, ai_client):
+            return
         with st.spinner("Inspecting freshness indicators..."):
-            result = _run_vision(ai_client, config, image)
+            result = _run_vision(ai_client, config, image, context)
         st.session_state["tab2_result"] = result
-
-    result = st.session_state.get("tab2_result", {})
+        st.session_state["tab2_fp"] = fingerprint
+    else:
+        result = st.session_state["tab2_result"]
 
     stage = result.get("freshness_stage", "Moderately Fresh")
     advice = result.get("safety_advice", "Consume within 24h")
+    freshness_score = STAGE_SCORE.get(stage, 60)
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("Item", result.get("item", "Unknown"))
-    with c2:
+    # ---- Image Left / Content Right ----
+    img_col, info_col = st.columns([1, 1])
+    with img_col:
+        st.image(image, caption="Uploaded perishable item", width="stretch")
+    with info_col:
+        st.markdown(f"### {esc(result.get('item', 'Unknown'))}")
         pill_class = freshness_to_pill(stage)
-        st.markdown(f'<span class="fv-pill {pill_class}">{stage}</span>', unsafe_allow_html=True)
-    with c3:
-        st.metric("Confidence", f"{result.get('confidence', 0)}%")
+        st.markdown(f'<span class="fv-pill {pill_class}">{esc(stage)}</span>', unsafe_allow_html=True)
 
-    st.divider()
+        score_color = "#10b981" if freshness_score >= 80 else ("#f59e0b" if freshness_score >= 45 else "#ef4444")
+        st.markdown(
+            f'<div class="fv-card" style="margin-top:0.7rem;">'
+            f'<div style="display:flex;align-items:baseline;gap:0.6rem;">'
+            f'<span style="font-size:2rem;font-weight:900;color:{score_color}">{freshness_score}</span>'
+            f'<span style="font-size:0.8rem;color:var(--fv-text-muted);font-weight:600;">Freshness index / 100</span>'
+            f'</div>'
+            f'<span class="fv-meter" style="display:block;margin-top:0.5rem;">'
+            f'<span class="fv-meter-fill" style="width:{freshness_score}%;background:{score_color}"></span></span>'
+            f'</div>', unsafe_allow_html=True,
+        )
+
+        metric_strip([
+            ("Confidence", f'{result.get("confidence", 0)}%', "", "#0ea5e9"),
+            ("Stored for", f"{age_days}" if age_days is not None else "—", "days", "#8b5cf6"),
+            ("Shelf life", f"{STORAGE_DAYS.get(storage, 7)}", "days", "#f59e0b"),
+        ])
 
     # Safety advice banner
     advice_class = safety_to_pill(advice)
     alert_type = "success" if advice_class == "safe" else ("danger" if advice_class == "discard" else "warn")
     st.markdown(
         f'<div class="fv-alert {alert_type}">'
-        f'<strong>Food Safety Verdict:</strong> {advice}</div>', unsafe_allow_html=True,
+        f'<strong>Food Safety Verdict:</strong> {esc(advice)}</div>', unsafe_allow_html=True,
     )
 
-    # Indicators
-    st.subheader("🔍 Visual Indicators")
+    st.divider()
+
+    # ---- Visual Indicators below ----
+    st.markdown('<div class="fv-section-title">🔍 Visual Indicators</div>', unsafe_allow_html=True)
     indicators = result.get("indicators", {})
-    ind_cols = st.columns(2)
     indicator_items = [
         ("Surface Texture", indicators.get("surface_texture", "—")),
         ("Discoloration", indicators.get("discoloration", "—")),
         ("Wrinkling", indicators.get("wrinkling", "—")),
         ("Mold", indicators.get("mold", "—")),
     ]
-    for i, (k, v) in enumerate(indicator_items):
-        with ind_cols[i % 2]:
-            st.markdown(
-                f'<div class="fv-card" style="padding:0.8rem 1rem;">'
-                f'<div style="font-weight:700;color:#22d3ee">{k}</div>'
-                f'<div style="color:#cbd5e1;font-size:0.95rem">{v}</div>'
-                f'</div>', unsafe_allow_html=True,
-            )
+    data_table(["Indicator", "Observation"], [[k, esc(v)] for k, v in indicator_items])
 
     # Preservation tips
     st.divider()
-    st.subheader("📦 Preservation & Storage Tips")
+    st.markdown('<div class="fv-section-title">📦 Preservation & Storage Tips</div>', unsafe_allow_html=True)
     tips = result.get("preservation_tips", [])
     if tips:
-        for tip in tips:
-            st.markdown(f"• {tip}")
+        st.markdown(
+            '<ul style="color:var(--fv-text-soft);line-height:1.7;margin-top:0.2rem;">'
+            + "".join(f"<li>{esc(t)}</li>" for t in tips)
+            + "</ul>",
+            unsafe_allow_html=True,
+        )
     else:
         st.caption("No specific tips available.")
 
     if result.get("notes"):
-        st.caption(f"🔎 {result['notes']}")
+        st.caption(f"🔎 {esc(result['notes'])}")
 
-    st.divider()
-    st.caption("Demo mode: freshness staging is heuristic. When safety is uncertain, discard the item.")
+    export_text = "\n".join([
+        f"Item: {result.get('item', '')}",
+        f"Freshness stage: {stage}",
+        f"Freshness index: {freshness_score}/100",
+        f"Safety advice: {advice}",
+        f"Storage: {storage}" + (f" ({age_days} days since purchase)" if age_days is not None else ""),
+        f"Confidence: {result.get('confidence', 0)}%",
+        "Indicators:",
+        *[f"- {k}: {v}" for k, v in indicator_items],
+        "Tips:",
+        *[f"- {t}" for t in tips],
+    ])
+    d_col, c_col = st.columns([1, 1])
+    with d_col:
+        download_button(export_text, "foodverse-freshness.txt", label="Download report")
+    with c_col:
+        copy_button(export_text, "Copy summary", key="tab2_copy")
+
+    st.caption("Freshness staging is heuristic. When safety is uncertain, discard the item.")

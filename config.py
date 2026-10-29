@@ -3,7 +3,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import List
+from typing import Dict, List
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:  # pragma: no cover - python-dotenv is optional
+    pass
 
 APP_TITLE = "Food Verse AI"
 APP_SUBTITLE = "Multimodal Food Intelligence Agent"
@@ -25,6 +32,40 @@ TABS = {
     "tab3": "3. Kitchen Hygiene & Safety Compliance",
     "tab4": "4. Smart Kitchen Recipe Assistant",
     "tab5": "5. Personalized Meal Planner",
+}
+
+# Presentation metadata for navigation and landing cards
+TAB_META: Dict[str, Dict[str, str]] = {
+    "tab1": {
+        "icon": "🍽️",
+        "title": "Food Recognition",
+        "blurb": "Identify a dish from a photo and audit macros, health score and allergens.",
+        "persona": "Nutritionist Nova",
+    },
+    "tab2": {
+        "icon": "🧪",
+        "title": "Freshness Check",
+        "blurb": "Stage the freshness of perishables with safety verdicts and storage tips.",
+        "persona": "Safety Inspector Rex",
+    },
+    "tab3": {
+        "icon": "🧼",
+        "title": "Kitchen Hygiene",
+        "blurb": "Score hygiene compliance and log itemized violations with corrective actions.",
+        "persona": "Safety Inspector Rex",
+    },
+    "tab4": {
+        "icon": "👨‍🍳",
+        "title": "Recipe Assistant",
+        "blurb": "Turn pantry ingredients into a practical recipe with swaps and chef tips.",
+        "persona": "Chef Verse",
+    },
+    "tab5": {
+        "icon": "📅",
+        "title": "Meal Planner",
+        "blurb": "Compute BMR/TDEE targets and generate a 7-day plan with a grocery list.",
+        "persona": "Nutritionist Nova",
+    },
 }
 
 # Nutrition macro defaults
@@ -63,13 +104,15 @@ GENDERS = ["Male", "Female", "Other / Prefer not to say"]
 @dataclass
 class AppConfig:
     provider: str = "Demo / Fallback Mode"
-    api_key: str = ""
+    api_key: str = field(default="", repr=False)
     model_name: str = ""
     temperature: float = 0.3
     persona_name: str = DEFAULT_PERSONA_NAME
     persona_role: str = DEFAULT_PERSONA_ROLE
     enable_fallback: bool = True
     demo_mode: bool = True
+    allow_user_api_key: bool = False
+    max_runs_per_session: int = 25
 
     @property
     def is_ai_enabled(self) -> bool:
@@ -81,24 +124,82 @@ class AppConfig:
 
 
 def get_gemini_model_name() -> str:
-    return os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    return _secret("GEMINI_MODEL", "gemini-1.5-flash")
 
 
 def get_groq_model_name() -> str:
-    return os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+    return _secret("GROQ_MODEL", "llama-3.1-8b-instant")
+
+
+def _secret(name: str, default: str = "") -> str:
+    """Read a secret from the Streamlit secrets store, falling back to the env.
+
+    On Streamlit Community Cloud the values entered in "Advanced settings → Secrets"
+    are exposed through ``st.secrets`` and as environment variables. Locally the
+    same values can live in ``.streamlit/secrets.toml`` or a ``.env`` file.
+    """
+    try:
+        import streamlit as st
+
+        value = st.secrets.get(name)
+        if value:
+            return str(value)
+    except Exception:
+        pass
+    return os.getenv(name, default) or default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = _secret(name, "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(_secret(name, "").strip() or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_temperature(default: float = 0.3) -> float:
+    """Read TEMPERATURE from the environment, clamped to the valid range."""
+    try:
+        value = float(_secret("TEMPERATURE", "") or default)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(1.0, value))
+
+
+def provider_api_key(provider: str) -> str:
+    """Return the server-managed key for a provider (never exposed to the UI)."""
+    if provider.startswith("Gemini"):
+        return _secret("GOOGLE_API_KEY")
+    if provider == "Groq":
+        return _secret("GROQ_API_KEY")
+    return ""
 
 
 def load_env_config() -> AppConfig:
-    """Build config from environment variables with safe defaults."""
-    provider = os.getenv("FOOD_VERSE_PROVIDER", "Demo / Fallback Mode")
-    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GROQ_API_KEY") or ""
-    if provider == "Gemini (Google)" and not api_key:
-        api_key = os.getenv("GOOGLE_API_KEY", "")
-    if provider == "Groq" and not api_key:
-        api_key = os.getenv("GROQ_API_KEY", "")
+    """Build config from environment variables and secrets with safe defaults."""
+    provider = _secret("FOOD_VERSE_PROVIDER", "Demo / Fallback Mode")
+    api_key = provider_api_key(provider)
+    if not api_key:
+        api_key = _secret("GOOGLE_API_KEY") or _secret("GROQ_API_KEY")
+    model_name = (
+        _secret("GEMINI_MODEL", get_gemini_model_name())
+        if provider.startswith("Gemini")
+        else _secret("GROQ_MODEL", get_groq_model_name())
+    )
     return AppConfig(
         provider=provider,
         api_key=api_key,
-        model_name=get_gemini_model_name() if provider.startswith("Gemini") else get_groq_model_name(),
+        model_name=model_name,
+        temperature=_env_temperature(),
         demo_mode=(provider == "Demo / Fallback Mode" or not api_key),
+        allow_user_api_key=_env_bool("ALLOW_USER_API_KEY", False),
+        max_runs_per_session=max(0, _env_int("MAX_RUNS_PER_SESSION", 25)),
     )
