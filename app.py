@@ -10,8 +10,7 @@ from config import (
     PLATFORM_ID,
     TAB_META,
     TABS,
-    get_gemini_model_name,
-    get_groq_model_name,
+    default_model_for,
     load_env_config,
     provider_api_key,
 )
@@ -54,6 +53,8 @@ def _init_session_state(config: AppConfig) -> None:
         st.session_state["view"] = deep_link if deep_link in TAB_META else "home"
     if "ai_client" not in st.session_state:
         st.session_state["ai_client"] = AIClient(config)
+    for stale_key in ("cfg_model", "dialog_model"):
+        st.session_state.pop(stale_key, None)
 
 
 def _navigate(view: str) -> None:
@@ -66,6 +67,14 @@ def _navigate(view: str) -> None:
             pass
     elif st.query_params.get("tab") != view:
         st.query_params["tab"] = view
+
+
+def _model_caption(provider: str) -> str:
+    """Read-only description of the model that the given provider will use."""
+    model = default_model_for(provider)
+    if model:
+        return f"Model: `{model}` — set by the provider's model secret, not editable here."
+    return "Model: not configured for this provider — the app will fall back to heuristic results."
 
 
 def _config_form(active_cfg: AppConfig, key_prefix: str = "cfg") -> None:
@@ -95,12 +104,7 @@ def _config_form(active_cfg: AppConfig, key_prefix: str = "cfg") -> None:
             'Set <code>ALLOW_USER_API_KEY=true</code> to let visitors bring their own key.</div>',
             unsafe_allow_html=True,
         )
-    model_name = st.text_input(
-        "Model (optional)",
-        value=st.session_state.get(f"{key_prefix}_model", active_cfg.model_name or ""),
-        placeholder="e.g. gemini-1.5-flash / llama-3.1-8b-instant",
-        key=f"{key_prefix}_model",
-    )
+    st.caption(_model_caption(provider))
     temperature = st.slider(
         "Temperature",
         0.0,
@@ -125,22 +129,14 @@ def _config_form(active_cfg: AppConfig, key_prefix: str = "cfg") -> None:
             api_key = active_cfg.api_key or provider_api_key(provider)
         else:
             api_key = provider_api_key(provider)
-        model = (st.session_state.get(f"{key_prefix}_model") or "").strip()
-        if not model:
-            model = (
-                get_gemini_model_name()
-                if provider.startswith("Gemini")
-                else get_groq_model_name()
-                if provider == "Groq"
-                else ""
-            )
+        model = default_model_for(provider)
         st.session_state["config"] = AppConfig(
             provider=provider,
             api_key=api_key,
             model_name=model or "",
             temperature=temperature,
             enable_fallback=enable_fallback,
-            demo_mode=(provider == "Demo / Fallback Mode" or not api_key),
+            demo_mode=(provider == "Demo / Fallback Mode" or not api_key or not model),
             allow_user_api_key=active_cfg.allow_user_api_key,
             max_runs_per_session=active_cfg.max_runs_per_session,
         )
@@ -159,7 +155,7 @@ def _config_dialog(config: AppConfig) -> None:
 
 def _provider_card(config: AppConfig) -> None:
     mode_label = "Demo / heuristic mode" if config.demo_mode else "Live provider"
-    model = config.model_name or "default model"
+    model = config.model_name or ("heuristics (no model)" if config.demo_mode else "default model")
     st.markdown(
         '<div class="fv-model-card">'
         '<div class="m-label">Active model</div>'
@@ -207,7 +203,7 @@ def _render_home(config: AppConfig) -> None:
     if config.demo_mode:
         mode_label = "Demo / heuristic mode"
         provider_label = "Visual estimates"
-        model_label = "No API key connected"
+        model_label = "Heuristic estimates — no model configured"
     else:
         mode_label = "Live analysis"
         provider_label = config.provider

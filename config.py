@@ -124,11 +124,31 @@ class AppConfig:
 
 
 def get_gemini_model_name() -> str:
-    return _secret("GEMINI_MODEL", "gemini-1.5-flash")
+    """Model id for Gemini, taken from the ``GEMINI_MODEL`` secret.
+
+    Empty means "not configured" - the app then uses heuristic results instead
+    of guessing a model id that a provider may have retired.
+    """
+    return _secret("GEMINI_MODEL", "")
 
 
 def get_groq_model_name() -> str:
-    return _secret("GROQ_MODEL", "llama-3.1-8b-instant")
+    """Model id for Groq, taken from the ``GROQ_MODEL`` secret (empty = unset)."""
+    return _secret("GROQ_MODEL", "")
+
+
+def default_model_for(provider: str) -> str:
+    """Resolve the model for a provider from its secret.
+
+    The model always follows the selected provider; there is no free-text
+    override. An empty result means the provider has no model configured and
+    the app falls back to heuristic (demo) output.
+    """
+    if provider.startswith("Gemini"):
+        return get_gemini_model_name()
+    if provider == "Groq":
+        return get_groq_model_name()
+    return ""
 
 
 def _secret(name: str, default: str = "") -> str:
@@ -189,17 +209,13 @@ def load_env_config() -> AppConfig:
     api_key = provider_api_key(provider)
     if not api_key:
         api_key = _secret("GOOGLE_API_KEY") or _secret("GROQ_API_KEY")
-    model_name = (
-        _secret("GEMINI_MODEL", get_gemini_model_name())
-        if provider.startswith("Gemini")
-        else _secret("GROQ_MODEL", get_groq_model_name())
-    )
+    model_name = default_model_for(provider)
     return AppConfig(
         provider=provider,
         api_key=api_key,
         model_name=model_name,
         temperature=_env_temperature(),
-        demo_mode=(provider == "Demo / Fallback Mode" or not api_key),
+        demo_mode=(provider == "Demo / Fallback Mode" or not api_key or not model_name),
         allow_user_api_key=_env_bool("ALLOW_USER_API_KEY", False),
         max_runs_per_session=max(0, _env_int("MAX_RUNS_PER_SESSION", 25)),
     )

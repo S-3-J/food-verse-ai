@@ -113,8 +113,8 @@ cp .env.example .env
 | `FOOD_VERSE_PROVIDER` | `Gemini (Google)`, `Groq` or `Demo / Fallback Mode` | `Demo / Fallback Mode` |
 | `GOOGLE_API_KEY` | Gemini API key | — |
 | `GROQ_API_KEY` | Groq API key | — |
-| `GEMINI_MODEL` | Gemini model name | `gemini-1.5-flash` |
-| `GROQ_MODEL` | Groq model name | `llama-3.1-8b-instant` |
+| `GEMINI_MODEL` | Gemini model id (empty = heuristic results) | — |
+| `GROQ_MODEL` | Groq model id (empty = heuristic results) | — |
 | `TEMPERATURE` | Optional sampling temperature hint | `0.3` |
 
 Environment variables are also read from the shell (`export GOOGLE_API_KEY=...`). A `.env` file in the project
@@ -122,8 +122,13 @@ root is loaded automatically at startup.
 
 ### Runtime configuration
 
-Provider, model, temperature and fallback behaviour can also be changed **without a restart** via
+Provider, temperature and fallback behaviour can also be changed **without a restart** via
 **Response Config** in the sidebar. Applying the form rebuilds the AI client and reruns the app.
+
+The **model always follows the selected provider** — it is read from the `GEMINI_MODEL` / `GROQ_MODEL`
+secret and is shown read-only in the dialog; there is no free-text model field. Changing a model means
+editing the matching secret (on Community Cloud this restarts the app). If a provider has no model
+configured, or the model id is unreachable, the workflow falls back to heuristic results.
 
 > The API key is **never** rendered in the browser. In the default deployment the key stays on the server
 > and the dialog only reports that a server-managed key is active. See
@@ -159,16 +164,18 @@ Provider, model, temperature and fallback behaviour can also be changed **withou
 
    ```toml
    GOOGLE_API_KEY = "your-gemini-key"
-   FOOD_VERSE_PROVIDER = "Gemini (Google)"
-   GEMINI_MODEL = "gemini-1.5-flash"
-   MAX_RUNS_PER_SESSION = 25
+   GEMINI_MODEL = "your-gemini-model-id"
+   MAX_RUNS_PER_SESSION = "25"
    ```
 
    ```toml
    GROQ_API_KEY = "your-groq-key"
-   FOOD_VERSE_PROVIDER = "Groq"
-   GROQ_MODEL = "llama-3.1-8b-instant"
+   GROQ_MODEL = "your-groq-model-id"
    ```
+
+   `FOOD_VERSE_PROVIDER` is optional — leave it at `Demo / Fallback Mode` to start in demo mode and let
+   visitors pick Gemini or Groq in **Response Config**. The model for each provider comes from its own
+   secret, so a provider with no model id simply runs on heuristic results.
 
 4. Save — the app restarts with the secret injected as an environment variable (also readable via
    `st.secrets`).
@@ -186,8 +193,8 @@ Provider, model, temperature and fallback behaviour can also be changed **withou
 - Keep `.streamlit/secrets.toml` and `.env` out of git (both are in `.gitignore`).
 - Restrict the provider key to the API only, set a spending/usage cap on the provider console, and rotate
   the key periodically.
-- Prefer a cheap, fast model (`gemini-1.5-flash`, `llama-3.1-8b-instant`) — every visitor consumes your
-  quota.
+- Prefer a cheap, fast model (set `GEMINI_MODEL` / `GROQ_MODEL` to a small, quick model id) — every visitor
+  consumes your quota.
 - Set `MAX_RUNS_PER_SESSION` so a single session cannot drain the quota.
 - Delete the secret from the app settings to revoke access immediately (the app falls back to demo mode).
 - Do not print `AppConfig` or `config.api_key` in logs, error messages or `st.write`.
@@ -309,7 +316,7 @@ The image runs the app headless on port 8501 and exposes it via uvicorn on port 
 | Symptom | Fix |
 |---------|-----|
 | "Demo / Fallback Mode is active" | Expected without a key — add one in **Response Config** or via `.env`. |
-| Live provider call fails | Check the key, the model name and network access; the workflow falls back to demo output with a warning. |
+| Live provider call fails | Check the key, the provider's model id (`GEMINI_MODEL` / `GROQ_MODEL`) and network access; the workflow falls back to demo output with a warning. |
 | Sidebar icons show as text | Do not override the font on `[data-testid="stIconMaterial"]`; `styles.py` already excludes it. |
 | Upload not updating results | Results are fingerprinted — re-upload a different file or press the run button. |
 | Port already in use | `streamlit run app.py --server.port 8502` |
